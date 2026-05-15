@@ -30,6 +30,32 @@
 
 ## 快速开始
 
+### Windows 双击启动
+
+在 Windows 上可以直接双击项目根目录里的：
+
+```text
+start_windows_app.bat
+```
+
+它会自动启动 Streamlit 服务，并打开默认浏览器访问 `http://127.0.0.1:8501`。
+
+首次运行前仍需要先安装依赖：
+
+```bash
+python -m pip install -r requirements.txt
+python -m playwright install chromium
+```
+
+如果想让同一局域网内的其他设备访问，可以在 PowerShell 中这样启动：
+
+```powershell
+$env:STREAMLIT_ADDRESS="0.0.0.0"
+.\start_windows_app.bat
+```
+
+然后在其他设备浏览器打开 `http://本机局域网IP:8501`。例如本机 IP 是 `192.168.111.10` 时，访问 `http://192.168.111.10:8501`。
+
 ### 从 Git 远程拉取运行
 
 如果要在另一台电脑或服务器上通过 Git 打开项目，先拉取远程仓库：
