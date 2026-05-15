@@ -30,6 +30,27 @@
 
 ## 快速开始
 
+### 从 Git 远程拉取运行
+
+如果要在另一台电脑或服务器上通过 Git 打开项目，先拉取远程仓库：
+
+```bash
+git clone https://github.com/boxsmall/Xiaohongshu_automatic_posting_tool.git
+cd Xiaohongshu_automatic_posting_tool
+```
+
+然后按下面步骤安装依赖、配置 `.env` 并启动 Streamlit。启动成功后，在当前机器浏览器打开 `http://127.0.0.1:8501`。
+
+如果部署在远程服务器上，需要把启动地址改为可被外部访问：
+
+```bash
+python -m streamlit run app.py --server.port 8501 --server.address 0.0.0.0
+```
+
+然后通过 `http://服务器IP:8501` 访问。服务器防火墙或安全组需要放行 `8501` 端口。
+
+注意：GitHub 只是 Git 代码仓库，不能直接运行这个 Streamlit 后端项目。想要一个公网网页链接，需要部署到 Streamlit Cloud、Render、Railway 或自有服务器，并在部署平台配置 `ARK_API_KEY` 等环境变量。
+
 1. 安装依赖：
 
 ```bash
