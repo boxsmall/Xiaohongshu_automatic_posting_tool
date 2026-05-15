@@ -36,6 +36,7 @@ class Settings:
     ).rstrip("/")
     openai_image_base_url: str = os.getenv("OPENAI_IMAGE_BASE_URL", "").rstrip("/")
     openai_image_api_key: str = os.getenv("OPENAI_IMAGE_API_KEY", "")
+    openai_image_use_env_proxy: bool = _bool_env("OPENAI_IMAGE_USE_ENV_PROXY", False)
 
     image_size: str = os.getenv("IMAGE_SIZE", "auto")
     image_output_format: str = os.getenv("IMAGE_OUTPUT_FORMAT", "png")

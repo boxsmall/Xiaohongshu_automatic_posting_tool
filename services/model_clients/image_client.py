@@ -4,12 +4,19 @@ from pathlib import Path
 from typing import Any, BinaryIO
 
 import requests
+from requests import RequestException
 
 from config import settings
 
 
 class ImageGenerationError(RuntimeError):
     pass
+
+
+def _request_session() -> requests.Session:
+    session = requests.Session()
+    session.trust_env = settings.openai_image_use_env_proxy
+    return session
 
 
 def _save_image_result(data: dict[str, Any], output_path: str) -> str:
@@ -30,8 +37,11 @@ def _save_image_result(data: dict[str, Any], output_path: str) -> str:
 
     url = first.get("url") or first.get("image_url")
     if url:
-        response = requests.get(url, timeout=120)
-        response.raise_for_status()
+        try:
+            response = _request_session().get(url, timeout=120)
+            response.raise_for_status()
+        except RequestException as exc:
+            raise ImageGenerationError(f"下载图片结果失败：{exc}") from exc
         path.write_bytes(response.content)
         return str(path)
 
@@ -94,14 +104,22 @@ def _post_openai_image_request(
     headers = {"Authorization": f"Bearer {settings.openai_image_api_key}"}
 
     files: list[tuple[str, tuple[str, BinaryIO, str]]] = []
+    session = _request_session()
     try:
         if ref_images:
             files = [_image_file_tuple(path) for path in ref_images]
             form_payload = {key: str(value) for key, value in payload.items()}
-            response = requests.post(url, headers=headers, data=form_payload, files=files, timeout=timeout)
+            response = session.post(url, headers=headers, data=form_payload, files=files, timeout=timeout)
         else:
             json_headers = {**headers, "Content-Type": "application/json"}
-            response = requests.post(url, headers=json_headers, json=payload, timeout=timeout)
+            response = session.post(url, headers=json_headers, json=payload, timeout=timeout)
+    except RequestException as exc:
+        proxy_hint = ""
+        if not settings.openai_image_use_env_proxy:
+            proxy_hint = "；当前已禁用环境代理，如你的中转站必须走代理，请设置 OPENAI_IMAGE_USE_ENV_PROXY=true"
+        raise ImageGenerationError(
+            f"图片模型网络请求失败：{exc}{proxy_hint}"
+        ) from exc
     finally:
         _close_files(files)
 

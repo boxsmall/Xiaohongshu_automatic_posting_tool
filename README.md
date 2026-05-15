@@ -103,11 +103,13 @@ IMAGE_MODEL_NAME=gpt-image-2
 IMAGE_MODEL_ID=gpt-image-2
 OPENAI_IMAGE_BASE_URL=https://你的中转站地址/v1
 OPENAI_IMAGE_API_KEY=你的中转站Key
+OPENAI_IMAGE_USE_ENV_PROXY=false
 IMAGE_SIZE=auto
 IMAGE_OUTPUT_FORMAT=png
 ```
 
 `OPENAI_IMAGE_BASE_URL` 推荐填写到 `/v1`，如果只填写中转站根域名，程序会自动补 `/v1`。
+默认不继承系统代理，避免中转站请求被本机代理干扰；如果你的中转站必须通过本机代理访问，再把 `OPENAI_IMAGE_USE_ENV_PROXY=true`。
 
 如果中转站不是 OpenAI Images API 兼容格式，需要按中转站文档调整 `services/model_clients/image_client.py` 的请求字段。
 
