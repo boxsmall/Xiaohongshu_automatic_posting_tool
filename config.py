@@ -44,6 +44,9 @@ class Settings:
     openai_image_retry_delay_seconds: float = float(
         os.getenv("OPENAI_IMAGE_RETRY_DELAY_SECONDS", "2")
     )
+    openai_image_use_reference_images: bool = _bool_env(
+        "OPENAI_IMAGE_USE_REFERENCE_IMAGES", True
+    )
     openai_text_base_url: str = os.getenv(
         "OPENAI_TEXT_BASE_URL", os.getenv("OPENAI_IMAGE_BASE_URL", "")
     ).rstrip("/")

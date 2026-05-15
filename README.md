@@ -118,13 +118,15 @@ OPENAI_IMAGE_USE_ENV_PROXY=false
 OPENAI_IMAGE_FALLBACK_TO_GENERATION=true
 OPENAI_IMAGE_RETRY_COUNT=1
 OPENAI_IMAGE_RETRY_DELAY_SECONDS=2
+OPENAI_IMAGE_USE_REFERENCE_IMAGES=false
 IMAGE_SIZE=auto
 IMAGE_OUTPUT_FORMAT=png
 ```
 
 `OPENAI_IMAGE_BASE_URL` 推荐填写到 `/v1`，如果只填写中转站根域名，程序会自动补 `/v1`。
 默认不继承系统代理，避免中转站请求被本机代理干扰；如果你的中转站必须通过本机代理访问，再把 `OPENAI_IMAGE_USE_ENV_PROXY=true`。
-如果中转站在 `/images/edits` 上返回 `524` 或其他临时 5xx，程序会先重试，再自动降级到 `/images/generations`，用纯文本提示词生成图片。
+如果中转站在 `/images/edits` 上返回 `524`、其他临时 5xx，或直接断开连接，程序会先重试，再自动降级到 `/images/generations`，用纯文本提示词生成图片。
+默认不上传参考图文件，图片会直接走 `/images/generations`，速度和稳定性通常更好；如果你的中转站稳定支持 `/images/edits`，再把 `OPENAI_IMAGE_USE_REFERENCE_IMAGES=true`。
 文本和图片请求默认都不继承系统代理，所以你开着本机代理也不应该影响生成流程；只有中转站必须通过本机代理访问时，才把对应的 `OPENAI_TEXT_USE_ENV_PROXY` 或 `OPENAI_IMAGE_USE_ENV_PROXY` 改成 `true`。
 
 如果中转站不是 OpenAI Images API 兼容格式，需要按中转站文档调整 `services/model_clients/image_client.py` 的请求字段。

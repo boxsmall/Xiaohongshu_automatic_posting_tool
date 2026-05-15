@@ -20,6 +20,10 @@ class ImageRelayHTTPError(ImageGenerationError):
         self.status_code = status_code
 
 
+class ImageRelayNetworkError(ImageGenerationError):
+    pass
+
+
 def _request_session() -> requests.Session:
     session = requests.Session()
     session.trust_env = settings.openai_image_use_env_proxy
@@ -125,10 +129,9 @@ def _request_once(
         json_headers = {**headers, "Content-Type": "application/json"}
         return session.post(url, headers=json_headers, json=payload, timeout=timeout)
     except RequestException as exc:
-        proxy_hint = ""
-        if not settings.openai_image_use_env_proxy:
-            proxy_hint = "；当前已禁用环境代理，如你的中转站必须走代理，请设置 OPENAI_IMAGE_USE_ENV_PROXY=true"
-        raise ImageGenerationError(f"图片模型网络请求失败：{exc}{proxy_hint}") from exc
+        raise ImageRelayNetworkError(
+            f"图片模型网络请求失败：{exc}。当前请求已设置为不继承系统代理。"
+        ) from exc
     finally:
         _close_files(files)
 
@@ -166,6 +169,16 @@ def _post_openai_image_request(
     raise ImageGenerationError("图片模型调用失败：没有收到有效响应。")
 
 
+def _should_fallback_from_refs(exc: ImageGenerationError, refs: list[str]) -> bool:
+    if not refs or not settings.openai_image_fallback_to_generation:
+        return False
+    if isinstance(exc, ImageRelayNetworkError):
+        return True
+    if isinstance(exc, ImageRelayHTTPError):
+        return exc.status_code in {408, 429, 500, 502, 503, 504, 524}
+    return False
+
+
 def generate_image_with_refs(
     prompt: str,
     ref_images: list[str],
@@ -175,19 +188,18 @@ def generate_image_with_refs(
 ) -> str:
     _validate_openai_relay_config()
 
-    refs = ref_images[: settings.max_ref_images_per_page]
+    refs = (
+        ref_images[: settings.max_ref_images_per_page]
+        if settings.openai_image_use_reference_images
+        else []
+    )
     payload = _base_payload(prompt, size)
     endpoint = "images/edits" if refs else "images/generations"
 
     try:
         data = _post_openai_image_request(endpoint, payload, refs, timeout)
-    except ImageRelayHTTPError as exc:
-        can_fallback = (
-            refs
-            and settings.openai_image_fallback_to_generation
-            and exc.status_code in {408, 429, 500, 502, 503, 504, 524}
-        )
-        if not can_fallback:
+    except ImageGenerationError as exc:
+        if not _should_fallback_from_refs(exc, refs):
             raise
         data = _post_openai_image_request("images/generations", payload, [], timeout)
 
