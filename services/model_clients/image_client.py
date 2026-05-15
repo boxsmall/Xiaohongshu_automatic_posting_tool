@@ -84,12 +84,13 @@ def _base_payload(prompt: str, size: str | None) -> dict[str, Any]:
         "n": 1,
     }
 
-    image_size = size or settings.image_size
-    if image_size:
+    image_size = (size or settings.image_size or "").strip()
+    if image_size and image_size.lower() != "auto":
         payload["size"] = image_size
 
-    if settings.image_output_format:
-        payload["output_format"] = settings.image_output_format
+    output_format = (settings.image_output_format or "").strip()
+    if output_format and output_format.lower() != "auto":
+        payload["output_format"] = output_format
 
     return payload
 
@@ -130,10 +131,30 @@ def _request_once(
         return session.post(url, headers=json_headers, json=payload, timeout=timeout)
     except RequestException as exc:
         raise ImageRelayNetworkError(
-            f"图片模型网络请求失败：{exc}。当前请求已设置为不继承系统代理。"
+            f"图片模型网络请求失败：{exc}。当前请求已设置为不继承系统代理；"
+            "如果 /v1/models 正常但图片仍断开，通常是中转站不支持或不稳定支持 Images API。"
         ) from exc
     finally:
         _close_files(files)
+
+
+def _response_error_summary(response: requests.Response) -> str:
+    text = response.text[:500]
+    lower_text = text.lower()
+    if "<html" in lower_text and "cloudflare" in lower_text:
+        if response.status_code == 502:
+            return (
+                "中转站图片接口返回 Cloudflare 502 Bad Gateway。"
+                "这通常表示该中转站的 /v1/images/generations 路由不可用，"
+                "请把 OPENAI_IMAGE_BASE_URL 换成支持 Images API 的中转站。"
+            )
+        if response.status_code == 524:
+            return (
+                "中转站图片接口返回 Cloudflare 524 Timeout。"
+                "这通常表示图片生成在中转站超时，请稍后重试或更换图片中转站。"
+            )
+        return f"中转站图片接口返回 Cloudflare HTML 错误页：HTTP {response.status_code}"
+    return f"HTTP {response.status_code} {text}"
 
 
 def _post_openai_image_request(
@@ -163,7 +184,7 @@ def _post_openai_image_request(
 
         raise ImageRelayHTTPError(
             response.status_code,
-            f"图片模型调用失败：HTTP {response.status_code} {response.text[:500]}",
+            f"图片模型调用失败：{_response_error_summary(response)}",
         )
 
     raise ImageGenerationError("图片模型调用失败：没有收到有效响应。")
