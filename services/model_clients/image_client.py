@@ -1,7 +1,7 @@
 import base64
 import mimetypes
 from pathlib import Path
-from typing import Any
+from typing import Any, BinaryIO
 
 import requests
 
@@ -10,26 +10,6 @@ from config import settings
 
 class ImageGenerationError(RuntimeError):
     pass
-
-
-def _model_candidates(model_id: str) -> list[str]:
-    if settings.has_image_model_id_override:
-        return [model_id]
-
-    candidates = [
-        model_id,
-        "doubao-seedream-5-0-260128",
-        "doubao-seedream-5-0-lite",
-        "seedream-5-0-lite",
-    ]
-    return list(dict.fromkeys([item for item in candidates if item]))
-
-
-def _image_to_data_url(path: str) -> str:
-    image_path = Path(path)
-    mime = mimetypes.guess_type(image_path.name)[0] or "image/png"
-    encoded = base64.b64encode(image_path.read_bytes()).decode("ascii")
-    return f"data:{mime};base64,{encoded}"
 
 
 def _save_image_result(data: dict[str, Any], output_path: str) -> str:
@@ -58,6 +38,84 @@ def _save_image_result(data: dict[str, Any], output_path: str) -> str:
     raise ImageGenerationError(f"未找到可保存的图片结果：{first}")
 
 
+def _validate_openai_relay_config() -> None:
+    if settings.image_model_provider != "openai_relay":
+        raise ImageGenerationError(
+            f"暂不支持的图片模型供应商：{settings.image_model_provider}，请配置 IMAGE_MODEL_PROVIDER=openai_relay"
+        )
+    if not settings.openai_image_base_url:
+        raise ImageGenerationError("缺少 OPENAI_IMAGE_BASE_URL，请在 .env 中配置中转站 /v1 地址。")
+    if not settings.openai_image_api_key:
+        raise ImageGenerationError("缺少 OPENAI_IMAGE_API_KEY，请在 .env 中配置中转站 Key。")
+
+
+def _openai_image_base_url() -> str:
+    base_url = settings.openai_image_base_url.rstrip("/")
+    if not base_url.endswith("/v1"):
+        base_url = f"{base_url}/v1"
+    return base_url
+
+
+def _base_payload(prompt: str, size: str | None) -> dict[str, Any]:
+    payload: dict[str, Any] = {
+        "model": settings.image_model_id,
+        "prompt": prompt,
+        "n": 1,
+    }
+
+    image_size = size or settings.image_size
+    if image_size:
+        payload["size"] = image_size
+
+    if settings.image_output_format:
+        payload["output_format"] = settings.image_output_format
+
+    return payload
+
+
+def _image_file_tuple(path: str) -> tuple[str, tuple[str, BinaryIO, str]]:
+    image_path = Path(path)
+    mime = mimetypes.guess_type(image_path.name)[0] or "image/png"
+    return "image", (image_path.name, image_path.open("rb"), mime)
+
+
+def _close_files(files: list[tuple[str, tuple[str, BinaryIO, str]]]) -> None:
+    for _, (_, file_obj, _) in files:
+        file_obj.close()
+
+
+def _post_openai_image_request(
+    endpoint: str,
+    payload: dict[str, Any],
+    ref_images: list[str],
+    timeout: int,
+) -> dict[str, Any]:
+    url = f"{_openai_image_base_url()}/{endpoint.lstrip('/')}"
+    headers = {"Authorization": f"Bearer {settings.openai_image_api_key}"}
+
+    files: list[tuple[str, tuple[str, BinaryIO, str]]] = []
+    try:
+        if ref_images:
+            files = [_image_file_tuple(path) for path in ref_images]
+            form_payload = {key: str(value) for key, value in payload.items()}
+            response = requests.post(url, headers=headers, data=form_payload, files=files, timeout=timeout)
+        else:
+            json_headers = {**headers, "Content-Type": "application/json"}
+            response = requests.post(url, headers=json_headers, json=payload, timeout=timeout)
+    finally:
+        _close_files(files)
+
+    if response.status_code >= 400:
+        raise ImageGenerationError(
+            f"图片模型调用失败：HTTP {response.status_code} {response.text[:500]}"
+        )
+
+    try:
+        return response.json()
+    except ValueError as exc:
+        raise ImageGenerationError(f"图片模型返回非 JSON 内容：{response.text[:500]}") from exc
+
+
 def generate_image_with_refs(
     prompt: str,
     ref_images: list[str],
@@ -65,63 +123,10 @@ def generate_image_with_refs(
     size: str | None = None,
     timeout: int = 180,
 ) -> str:
-    if settings.image_model_provider != "ark":
-        raise ImageGenerationError(f"暂不支持的图片模型供应商：{settings.image_model_provider}")
-    if not settings.ark_api_key:
-        raise ImageGenerationError("缺少 ARK_API_KEY，请在 .env 中配置。")
+    _validate_openai_relay_config()
 
     refs = ref_images[: settings.max_ref_images_per_page]
-    encoded_refs = [_image_to_data_url(path) for path in refs]
-
-    payload: dict[str, Any] = {
-        "model": settings.image_model_id,
-        "prompt": prompt,
-        "size": size or settings.image_size,
-        "output_format": settings.image_output_format,
-        "response_format": "b64_json",
-        "watermark": False,
-        "sequential_image_generation": "disabled",
-        "extra_body": {
-            "provider": {
-                "enable_image_base64": True,
-                "enable_image_origin_data": True,
-            }
-        },
-    }
-    if encoded_refs:
-        payload["image"] = encoded_refs if len(encoded_refs) > 1 else encoded_refs[0]
-
-    url = f"{settings.ark_base_url}/images/generations"
-    headers = {
-        "Authorization": f"Bearer {settings.ark_api_key}",
-        "Content-Type": "application/json",
-    }
-
-    last_response = None
-    for model in _model_candidates(settings.image_model_id):
-        payload["model"] = model
-        response = requests.post(url, headers=headers, json=payload, timeout=timeout)
-        if response.status_code < 400:
-            break
-        last_response = response
-        if response.status_code == 404:
-            continue
-        if payload.get("response_format") == "b64_json":
-            retry_payload = dict(payload)
-            retry_payload["response_format"] = "url"
-            response = requests.post(url, headers=headers, json=retry_payload, timeout=timeout)
-            if response.status_code < 400:
-                break
-            last_response = response
-        break
-    else:
-        response = last_response
-
-    if response is None:
-        raise ImageGenerationError("图片模型调用失败：没有收到响应。")
-    if response.status_code >= 400:
-        raise ImageGenerationError(
-            f"图片模型调用失败：HTTP {response.status_code} {response.text[:500]}"
-        )
-
-    return _save_image_result(response.json(), output_path)
+    payload = _base_payload(prompt, size)
+    endpoint = "images/edits" if refs else "images/generations"
+    data = _post_openai_image_request(endpoint, payload, refs, timeout)
+    return _save_image_result(data, output_path)
