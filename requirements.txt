@@ -1,0 +1,7 @@
+streamlit
+python-dotenv
+pydantic
+pillow
+requests
+python-slugify
+playwright

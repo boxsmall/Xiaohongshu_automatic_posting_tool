@@ -1,0 +1,833 @@
+
+
+### **可以，把第一版改成“本地参考图文件夹 + 人工审核 + 自动创建小红书草稿”的轻量工具。** 核心流程变成：读取本地参考图 → 生成文案和图片 → 你在本地页面审核 → 点击“通过并生成草稿” → Playwright 打开小红书创作服务平台并自动填标题、正文、上传图片，最后停在草稿/发布页由你确认。
+
+这个版本仍然不做自动发布，只做“自动生成草稿”。小红书创作服务平台有发布入口和笔记管理入口，可作为草稿创建的目标页面；实际页面结构可能变化，所以自动化脚本要设计成可维护、可人工接管的方式。[小红书创作服务平台](https://creator.xiaohongshu.com/publish/publish?source=official)
+
+---
+
+### **一、更新后的第一版流程**
+
+你现在的需求可以收敛成这个最小闭环：
+
+```text
+本地参考图文件夹
+→ 输入选题
+→ 生成小红书文案
+→ 按参考图风格生成图片
+→ 本地预览
+→ 人工审核
+→ 审核通过后自动打开小红书创作平台
+→ 上传图片、填写标题、正文、话题
+→ 生成草稿
+→ 你手动最终确认发布
+```
+
+对应流程图：
+
+```mermaid
+flowchart TD
+    A[本地参考图文件夹] --> B[读取参考图]
+    C[输入选题] --> D[生成文案]
+    B --> E[生成图片Prompt]
+    D --> E
+    E --> F[调用图像模型出图]
+    F --> G[本地预览]
+    D --> G
+    G --> H{人工审核}
+    H -->|驳回| D
+    H -->|通过| I[创建发布包]
+    I --> J[Playwright打开小红书创作平台]
+    J --> K[上传图片]
+    K --> L[填写标题/正文/话题]
+    L --> M[停留在草稿页等待人工确认]
+```
+
+---
+
+### **二、功能边界**
+
+第一版只做这些：
+
+| 功能 | 是否做 |
+|---|---|
+| 从本地文件夹读取参考图 | 做 |
+| 输入选题生成文案 | 做 |
+| 根据参考图风格生成图片 | 做 |
+| 本地预览和人工审核 | 做 |
+| 审核通过后自动创建小红书草稿 | 做 |
+| 自动发布 | 不做 |
+| 多账号管理 | 不做 |
+| 数据看板 | 不做 |
+| 复杂 Agent 编排 | 不做 |
+| 登录绕过/验证码绕过 | 不做 |
+
+这里的“自动创建草稿”建议用浏览器自动化完成，但必须保留人工登录和人工最终确认。遇到登录、扫码、验证码、风控提示，脚本暂停，由你手动处理。
+
+---
+
+### **三、本地文件夹结构**
+
+你可以把参考图放在一个固定目录，比如：
+
+```text
+xhs-style-agent/
+  assets/
+    refs/
+      my_style/
+        cover/
+          cover_01.png
+          cover_02.png
+        content/
+          content_01.png
+          content_02.png
+          content_03.png
+        ending/
+          ending_01.png
+
+    outputs/
+      20260514_173000_ai_tools/
+        cover.png
+        image_1.png
+        image_2.png
+        image_3.png
+        title.txt
+        body.txt
+        hashtags.txt
+        publish.md
+        draft_payload.json
+```
+
+建议参考图分成三类：
+
+```text
+cover/    封面参考图
+content/  内容页参考图
+ending/   结尾页参考图
+```
+
+这样生成图片时可以按页面类型选择参考图：
+
+```text
+第 1 张图 → 使用 cover 参考图
+第 2-N 张图 → 使用 content 参考图
+最后 1 张图 → 使用 ending 参考图
+```
+
+如果你只想简单一点，也可以全部放在：
+
+```text
+assets/refs/my_style/
+```
+
+然后每次生成图片都把这些参考图一起传给图像模型。
+
+---
+
+### **四、更新后的项目结构**
+
+```text
+xhs-style-agent/
+  app.py
+  config.py
+  requirements.txt
+  .env
+
+  services/
+    copy_service.py
+    image_service.py
+    ref_service.py
+    review_service.py
+    export_service.py
+    xhs_draft_service.py
+
+  automation/
+    xhs_creator_bot.py
+
+  prompts/
+    copywriting_prompt.txt
+    image_prompt_prompt.txt
+    safety_check_prompt.txt
+
+  assets/
+    refs/
+      my_style/
+        cover/
+        content/
+        ending/
+
+    outputs/
+
+  browser_profile/
+    xhs/
+```
+
+其中：
+
+```text
+browser_profile/xhs/
+```
+
+用于保存小红书创作平台的登录态。第一次运行时你扫码登录，之后只要登录态没过期，Playwright 可以复用这个浏览器配置。
+
+---
+
+### **五、新增的“审核通过后生成草稿”状态**
+
+第一版可以不用数据库，直接用 JSON 文件记录状态。
+
+`draft_payload.json`：
+
+```json
+{
+  "status": "approved",
+  "title": "这5个AI工具，真的帮我少做了很多重复活",
+  "body": "最近我把工作里最重复的几个环节重新整理了一下...",
+  "hashtags": ["AI工具", "效率工具", "职场干货", "打工人"],
+  "images": [
+    "assets/outputs/20260514_173000_ai_tools/cover.png",
+    "assets/outputs/20260514_173000_ai_tools/image_1.png",
+    "assets/outputs/20260514_173000_ai_tools/image_2.png"
+  ],
+  "created_at": "2026-05-14T17:18:39+08:00"
+}
+```
+
+人工审核页面里有三个按钮：
+
+```text
+重新生成文案
+重新生成图片
+通过并生成小红书草稿
+```
+
+点击“通过并生成小红书草稿”后，调用：
+
+```python
+create_xhs_draft(draft_payload)
+```
+
+---
+
+### **六、自动创建草稿的实现方式**
+
+推荐使用 Playwright，而不是 Selenium。Playwright 对现代网页的文件上传、等待元素、浏览器上下文保存更稳定。
+
+#### **安装依赖**
+
+`requirements.txt`：
+
+```txt
+streamlit
+python-dotenv
+pydantic
+pillow
+requests
+python-slugify
+playwright
+```
+
+安装浏览器：
+
+```bash
+playwright install chromium
+```
+
+---
+
+### **七、Playwright 自动草稿脚本**
+
+这里给你一个可改造的基础版本。由于小红书创作服务平台页面结构可能更新，选择器需要你第一次调试时根据实际页面微调。目标不是绕过限制，而是打开官方创作平台，复用你手动登录后的浏览器状态，自动上传图片和填入内容。
+
+`automation/xhs_creator_bot.py`：
+
+```python
+from pathlib import Path
+from playwright.sync_api import sync_playwright, TimeoutError as PlaywrightTimeoutError
+
+
+XHS_PUBLISH_URL = "https://creator.xiaohongshu.com/publish/publish?source=official"
+
+
+def create_xhs_draft(
+    title: str,
+    body: str,
+    hashtags: list[str],
+    image_paths: list[str],
+    user_data_dir: str = "browser_profile/xhs",
+    headless: bool = False
+):
+    """
+    创建小红书草稿。
+    注意：
+    1. 不自动发布。
+    2. 第一次运行需要人工扫码登录。
+    3. 遇到验证码、风控、登录失效，脚本会停留，人工处理。
+    4. 页面选择器可能需要根据实际页面调整。
+    """
+
+    image_paths = [str(Path(p).resolve()) for p in image_paths]
+
+    for p in image_paths:
+        if not Path(p).exists():
+            raise FileNotFoundError(f"图片不存在：{p}")
+
+    final_body = build_xhs_body(body, hashtags)
+
+    with sync_playwright() as p:
+        context = p.chromium.launch_persistent_context(
+            user_data_dir=user_data_dir,
+            headless=headless,
+            viewport={"width": 1440, "height": 1000},
+            args=[
+                "--disable-blink-features=AutomationControlled"
+            ]
+        )
+
+        page = context.new_page()
+        page.goto(XHS_PUBLISH_URL, wait_until="domcontentloaded")
+
+        print("已打开小红书创作平台。若未登录，请手动扫码登录。")
+
+        wait_for_login_or_publish_page(page)
+
+        upload_images(page, image_paths)
+        fill_title(page, title)
+        fill_body(page, final_body)
+
+        print("草稿内容已填写完成。请在浏览器中人工检查。")
+        print("确认无误后，你可以手动保存草稿或发布。")
+
+        page.bring_to_front()
+
+        # 不关闭浏览器，方便你继续人工操作
+        input("检查完成后按回车结束脚本...")
+        context.close()
+
+
+def build_xhs_body(body: str, hashtags: list[str]) -> str:
+    tag_text = " ".join([f"#{tag}" for tag in hashtags])
+    return f"{body.strip()}\n\n{tag_text}"
+
+
+def wait_for_login_or_publish_page(page):
+    """
+    等待进入发布页。
+    如果需要扫码登录，给用户足够时间处理。
+    """
+    try:
+        page.wait_for_load_state("networkidle", timeout=15000)
+    except PlaywrightTimeoutError:
+        pass
+
+    # 给人工扫码登录留时间
+    for _ in range(60):
+        url = page.url
+        if "publish" in url or "creator" in url:
+            try:
+                if page.locator("input[type='file']").count() > 0:
+                    return
+            except Exception:
+                pass
+
+        page.wait_for_timeout(1000)
+
+    print("未检测到发布页文件上传入口，可能需要人工登录或页面结构已变化。")
+    input("请手动完成登录并进入发布页面后，按回车继续...")
+
+
+def upload_images(page, image_paths: list[str]):
+    """
+    上传图片。
+    大多数发布页会有 input[type=file]。
+    如果页面隐藏了 input，Playwright 仍然可以 set_input_files。
+    """
+    file_inputs = page.locator("input[type='file']")
+
+    if file_inputs.count() == 0:
+        raise RuntimeError("未找到图片上传 input[type='file']，需要检查页面结构。")
+
+    file_input = file_inputs.first
+    file_input.set_input_files(image_paths)
+
+    print(f"已上传 {len(image_paths)} 张图片。")
+
+    # 等待图片上传处理
+    page.wait_for_timeout(5000)
+
+
+def fill_title(page, title: str):
+    """
+    填写标题。
+    选择器需要根据实际页面调整。
+    """
+    candidates = [
+        "input[placeholder*='标题']",
+        "textarea[placeholder*='标题']",
+        "[contenteditable='true']"
+    ]
+
+    for selector in candidates:
+        locator = page.locator(selector)
+        if locator.count() > 0:
+            try:
+                locator.first.click()
+                locator.first.fill(title)
+                print("标题已填写。")
+                return
+            except Exception:
+                continue
+
+    raise RuntimeError("未找到标题输入框，需要根据页面结构调整选择器。")
+
+
+def fill_body(page, body: str):
+    """
+    填写正文。
+    选择器需要根据实际页面调整。
+    """
+    candidates = [
+        "textarea[placeholder*='正文']",
+        "textarea[placeholder*='描述']",
+        "textarea[placeholder*='分享']",
+        "div[contenteditable='true']"
+    ]
+
+    for selector in candidates:
+        locator = page.locator(selector)
+        if locator.count() > 0:
+            try:
+                # 如果第一个 contenteditable 是标题，可能需要选择第二个
+                target = locator.nth(1) if locator.count() > 1 else locator.first
+                target.click()
+                target.fill(body)
+                print("正文已填写。")
+                return
+            except Exception:
+                continue
+
+    raise RuntimeError("未找到正文输入框，需要根据页面结构调整选择器。")
+```
+
+这个脚本的关键点：
+
+```text
+1. 使用 launch_persistent_context 保存登录态。
+2. 第一次运行时你手动扫码登录。
+3. 只上传图片和填写内容，不点击发布。
+4. 页面结构变化时，只需要改选择器。
+5. 运行结束前暂停，方便你人工检查。
+```
+
+---
+
+### **八、在 Streamlit 里接入“通过并生成草稿”按钮**
+
+`services/xhs_draft_service.py`：
+
+```python
+import json
+from pathlib import Path
+from automation.xhs_creator_bot import create_xhs_draft
+
+
+def load_draft_payload(output_dir: str):
+    payload_path = Path(output_dir) / "draft_payload.json"
+
+    if not payload_path.exists():
+        raise FileNotFoundError(f"未找到 draft_payload.json：{payload_path}")
+
+    return json.loads(payload_path.read_text(encoding="utf-8"))
+
+
+def create_draft_from_output(output_dir: str):
+    payload = load_draft_payload(output_dir)
+
+    title = payload["title"]
+    body = payload["body"]
+    hashtags = payload["hashtags"]
+    images = payload["images"]
+
+    create_xhs_draft(
+        title=title,
+        body=body,
+        hashtags=hashtags,
+        image_paths=images,
+        user_data_dir="browser_profile/xhs",
+        headless=False
+    )
+```
+
+在 `app.py` 审核页面里加按钮：
+
+```python
+import streamlit as st
+from services.xhs_draft_service import create_draft_from_output
+
+
+st.header("人工审核")
+
+output_dir = st.text_input("当前输出目录")
+
+if st.button("通过并生成小红书草稿"):
+    if not output_dir:
+        st.error("请先选择输出目录")
+    else:
+        with st.spinner("正在打开小红书创作平台并生成草稿..."):
+            create_draft_from_output(output_dir)
+        st.success("草稿已填写到小红书创作平台，请在浏览器中人工检查。")
+```
+
+---
+
+### **九、参考图从本地文件夹读取**
+
+你说参考图片会放在一个本地文件夹里，那就不需要上传组件了。直接在 `.env` 里配置：
+
+```bash
+REF_IMAGE_DIR=assets/refs/my_style
+```
+
+`config.py`：
+
+```python
+import os
+from dotenv import load_dotenv
+
+load_dotenv()
+
+REF_IMAGE_DIR = os.getenv("REF_IMAGE_DIR", "assets/refs/my_style")
+OUTPUT_DIR = os.getenv("OUTPUT_DIR", "assets/outputs")
+
+TEXT_MODEL_NAME = os.getenv("TEXT_MODEL_NAME", "qwen-plus")
+IMAGE_MODEL_NAME = os.getenv("IMAGE_MODEL_NAME", "wanx")
+```
+
+`services/ref_service.py`：
+
+```python
+from pathlib import Path
+
+
+IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".webp"}
+
+
+def list_reference_images(ref_dir: str):
+    root = Path(ref_dir)
+
+    if not root.exists():
+        raise FileNotFoundError(f"参考图文件夹不存在：{ref_dir}")
+
+    images = [
+        str(p)
+        for p in root.rglob("*")
+        if p.suffix.lower() in IMAGE_EXTS
+    ]
+
+    if not images:
+        raise RuntimeError(f"参考图文件夹为空：{ref_dir}")
+
+    return images
+
+
+def list_reference_images_by_type(ref_dir: str):
+    root = Path(ref_dir)
+
+    result = {
+        "cover": [],
+        "content": [],
+        "ending": []
+    }
+
+    for key in result.keys():
+        subdir = root / key
+        if subdir.exists():
+            result[key] = [
+                str(p)
+                for p in subdir.rglob("*")
+                if p.suffix.lower() in IMAGE_EXTS
+            ]
+
+    # 如果没有分类文件夹，就用全部图片兜底
+    all_images = list_reference_images(ref_dir)
+
+    for key in result.keys():
+        if not result[key]:
+            result[key] = all_images
+
+    return result
+```
+
+图片生成时：
+
+```python
+from services.ref_service import list_reference_images_by_type
+
+
+def pick_refs_for_page(ref_dir: str, page: dict):
+    refs = list_reference_images_by_type(ref_dir)
+
+    page_type = page.get("type", "content")
+
+    if page_type == "cover":
+        return refs["cover"]
+
+    if page_type == "ending":
+        return refs["ending"]
+
+    return refs["content"]
+```
+
+---
+
+### **十、生成图片时使用本地参考图**
+
+`services/image_service.py` 可以设计成这样：
+
+```python
+from pathlib import Path
+from services.ref_service import list_reference_images_by_type
+
+
+def generate_images_for_note(
+    image_client,
+    pages: list[dict],
+    style_profile: dict,
+    ref_dir: str,
+    output_dir: str
+):
+    refs = list_reference_images_by_type(ref_dir)
+    output = Path(output_dir)
+    output.mkdir(parents=True, exist_ok=True)
+
+    image_paths = []
+
+    for page in pages:
+        page_type = page.get("type", "content")
+
+        if page_type == "cover":
+            ref_images = refs["cover"]
+            filename = "cover.png"
+        elif page_type == "ending":
+            ref_images = refs["ending"]
+            filename = f"image_{page['page']}.png"
+        else:
+            ref_images = refs["content"]
+            filename = f"image_{page['page']}.png"
+
+        prompt = build_image_prompt(style_profile, page)
+
+        image_path = output / filename
+
+        image_client.generate_with_refs(
+            prompt=prompt,
+            ref_images=ref_images,
+            output_path=str(image_path)
+        )
+
+        image_paths.append(str(image_path))
+
+    return image_paths
+
+
+def build_image_prompt(style_profile: dict, page: dict):
+    return f"""
+请根据参考图风格生成一张小红书图文页。
+
+风格要求：
+{style_profile}
+
+当前页内容：
+页码：{page.get("page")}
+类型：{page.get("type")}
+主标题：{page.get("main_text")}
+副标题：{page.get("sub_text")}
+说明：{page.get("visual_instruction")}
+
+要求：
+1. 严格保持参考图的整体视觉风格。
+2. 保持相似的配色、留白、字体层级和排版结构。
+3. 文字必须清晰，适合手机端阅读。
+4. 不要二维码、外链、联系方式、水印。
+5. 不要过度复杂。
+6. 生成适合小红书图文笔记的图片。
+"""
+```
+
+图像模型选择上，如果你希望“多张参考图 + 风格一致 + 批量出图”，优先考虑支持图像编辑、风格迁移、多图输入、主体一致性或参考图生图的模型。通义万相图像生成与编辑 API 的说明中提到支持基于输入图像进行编辑、风格迁移或主体一致性生成；Seedream 相关资料也提到多图参考和一致性生成能力，适合做统一风格的图文素材。[阿里云帮助中心](https://help.aliyun.com/zh/model-studio/wan-image-generation-api-reference) [DeepSeek技术社区](https://deepseek.csdn.net/69f6a6b10a2f6a37c5a7945f.html)
+
+---
+
+### **十一、保存草稿数据**
+
+每次生成内容后，保存一个 `draft_payload.json`，供审核通过后自动创建草稿。
+
+`services/export_service.py`：
+
+```python
+import json
+from pathlib import Path
+
+
+def save_draft_payload(
+    output_dir: str,
+    title: str,
+    body: str,
+    hashtags: list[str],
+    image_paths: list[str]
+):
+    output = Path(output_dir)
+    output.mkdir(parents=True, exist_ok=True)
+
+    payload = {
+        "status": "pending_review",
+        "title": title,
+        "body": body,
+        "hashtags": hashtags,
+        "images": image_paths
+    }
+
+    path = output / "draft_payload.json"
+
+    path.write_text(
+        json.dumps(payload, ensure_ascii=False, indent=2),
+        encoding="utf-8"
+    )
+
+    return str(path)
+
+
+def mark_payload_approved(output_dir: str):
+    path = Path(output_dir) / "draft_payload.json"
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    payload["status"] = "approved"
+
+    path.write_text(
+        json.dumps(payload, ensure_ascii=False, indent=2),
+        encoding="utf-8"
+    )
+
+    return payload
+```
+
+审核通过按钮调用：
+
+```python
+from services.export_service import mark_payload_approved
+from services.xhs_draft_service import create_draft_from_output
+
+
+if st.button("通过并生成小红书草稿"):
+    mark_payload_approved(output_dir)
+    create_draft_from_output(output_dir)
+```
+
+---
+
+### **十二、完整轻量版运行流程**
+
+实际使用时，你的操作流程是：
+
+```text
+1. 把参考图放到 assets/refs/my_style/
+2. 启动 Streamlit
+3. 输入选题
+4. 点击生成内容
+5. 系统生成标题、正文、标签、图片
+6. 你在页面里审核
+7. 不满意就重生成
+8. 满意后点击“通过并生成小红书草稿”
+9. 浏览器自动打开小红书创作平台
+10. 第一次需要你扫码登录
+11. 系统上传图片并填写标题、正文、标签
+12. 停在页面上，由你最终检查
+```
+
+启动方式：
+
+```bash
+streamlit run app.py
+```
+
+第一次使用 Playwright：
+
+```bash
+playwright install chromium
+```
+
+---
+
+### **十三、推荐的 `.env` 配置**
+
+```bash
+REF_IMAGE_DIR=assets/refs/my_style
+OUTPUT_DIR=assets/outputs
+
+TEXT_MODEL_PROVIDER=aliyun
+TEXT_MODEL_NAME=qwen-plus
+
+IMAGE_MODEL_PROVIDER=aliyun
+IMAGE_MODEL_NAME=wanx
+
+ALIYUN_API_KEY=你的阿里云百炼Key
+ARK_API_KEY=你的火山方舟Key
+
+XHS_BROWSER_PROFILE=browser_profile/xhs
+XHS_HEADLESS=false
+```
+
+---
+
+### **十四、这个版本的最终架构**
+
+```mermaid
+flowchart LR
+    A[本地参考图文件夹] --> B[读取参考图]
+    B --> C[图片生成服务]
+    D[选题输入] --> E[文案生成服务]
+    E --> F[草稿数据 draft_payload.json]
+    C --> F
+    F --> G[Streamlit预览]
+    G --> H{人工审核}
+    H -->|不通过| E
+    H -->|通过| I[Playwright]
+    I --> J[小红书创作平台]
+    J --> K[生成草稿/等待人工确认]
+```
+
+---
+
+### **十五、当前版本你只需要开发 5 个核心模块**
+
+| 模块 | 作用 |
+|---|---|
+| `ref_service.py` | 读取本地参考图文件夹 |
+| `copy_service.py` | 生成标题、正文、标签、图片页文案 |
+| `image_service.py` | 根据参考图生成图片 |
+| `review_service.py` | 本地人工审核状态 |
+| `xhs_creator_bot.py` | 打开小红书创作平台并创建草稿 |
+
+不需要数据库，不需要后端服务，不需要 Celery，不需要复杂 Agent 编排。
+
+---
+
+### **十六、实现优先级**
+
+建议按这个顺序做：
+
+```text
+P0：读取本地参考图
+P0：生成文案
+P0：生成图片
+P0：保存 draft_payload.json
+P0：人工审核按钮
+P1：Playwright 打开小红书创作平台
+P1：上传图片
+P1：填写标题和正文
+P1：停留等待人工确认
+P2：支持单张图重生成
+P2：支持多个参考图风格文件夹
+P2：保存历史记录
+```
+
+这样你第一版可以非常快地跑起来，而且后面如果想扩展成自动排期、数据复盘、多模板，也不会推倒重来。
