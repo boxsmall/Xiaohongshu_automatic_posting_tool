@@ -4,7 +4,7 @@
 
 ## 功能概览
 
-- 文案生成：使用 Doubao-Seed-2.0-lite 生成小红书风格标题、正文和发布文案。
+- 文案生成：通过 OpenAI 兼容中转站调用 gpt-5.5，生成小红书风格标题、正文和发布文案。
 - 图片生成：通过 OpenAI 兼容中转站调用 gpt-image-2，生成 3 张主题相关图文配图。
 - 参考图管理：读取 `参考图` 文件夹中的封面、内容页、结尾页参考图，页面中默认折叠展示。
 - 选题灵感：通过 Playwright 打开小红书搜索页，搜索“减脂餐做法”，采集公开可见卡片信息后提炼原创菜谱选题。
@@ -75,7 +75,7 @@ python -m streamlit run app.py --server.port 8501 --server.address 0.0.0.0
 
 然后通过 `http://服务器IP:8501` 访问。服务器防火墙或安全组需要放行 `8501` 端口。
 
-注意：GitHub 只是 Git 代码仓库，不能直接运行这个 Streamlit 后端项目。想要一个公网网页链接，需要部署到 Streamlit Cloud、Render、Railway 或自有服务器，并在部署平台配置 `ARK_API_KEY`、`OPENAI_IMAGE_BASE_URL`、`OPENAI_IMAGE_API_KEY` 等环境变量。
+注意：GitHub 只是 Git 代码仓库，不能直接运行这个 Streamlit 后端项目。想要一个公网网页链接，需要部署到 Streamlit Cloud、Render、Railway 或自有服务器，并在部署平台配置 `OPENAI_TEXT_BASE_URL`、`OPENAI_IMAGE_BASE_URL`、`OPENAI_IMAGE_API_KEY` 等环境变量。
 
 1. 安装依赖：
 
@@ -90,10 +90,21 @@ python -m playwright install chromium
 copy .env.example .env
 ```
 
-然后在 `.env` 中填入你的火山方舟 `ARK_API_KEY`，以及图片中转站的 `OPENAI_IMAGE_BASE_URL` 和 `OPENAI_IMAGE_API_KEY`。当前默认模型配置为：
+然后在 `.env` 中填入中转站的 `OPENAI_IMAGE_BASE_URL` 和 `OPENAI_IMAGE_API_KEY`。文本模型默认复用图片中转站 Key，如需分开计费或分开中转站，再单独配置 `OPENAI_TEXT_API_KEY`。当前默认模型配置为：
 
-- 文案模型：`Doubao-Seed-2.0-lite`
+- 文案模型：`gpt-5.5`
 - 图片模型：`gpt-image-2`
+
+文案模型走 OpenAI Chat Completions 兼容中转站：
+
+```env
+TEXT_MODEL_PROVIDER=openai_relay
+TEXT_MODEL_NAME=gpt-5.5
+TEXT_MODEL_ID=gpt-5.5
+OPENAI_TEXT_BASE_URL=https://你的中转站地址/v1
+# OPENAI_TEXT_API_KEY=如需和图片不同，填写文本中转站Key；不填则复用 OPENAI_IMAGE_API_KEY
+OPENAI_TEXT_USE_ENV_PROXY=false
+```
 
 图片模型走 OpenAI Images API 兼容中转站：
 
@@ -114,6 +125,7 @@ IMAGE_OUTPUT_FORMAT=png
 `OPENAI_IMAGE_BASE_URL` 推荐填写到 `/v1`，如果只填写中转站根域名，程序会自动补 `/v1`。
 默认不继承系统代理，避免中转站请求被本机代理干扰；如果你的中转站必须通过本机代理访问，再把 `OPENAI_IMAGE_USE_ENV_PROXY=true`。
 如果中转站在 `/images/edits` 上返回 `524` 或其他临时 5xx，程序会先重试，再自动降级到 `/images/generations`，用纯文本提示词生成图片。
+文本和图片请求默认都不继承系统代理，所以你开着本机代理也不应该影响生成流程；只有中转站必须通过本机代理访问时，才把对应的 `OPENAI_TEXT_USE_ENV_PROXY` 或 `OPENAI_IMAGE_USE_ENV_PROXY` 改成 `true`。
 
 如果中转站不是 OpenAI Images API 兼容格式，需要按中转站文档调整 `services/model_clients/image_client.py` 的请求字段。
 

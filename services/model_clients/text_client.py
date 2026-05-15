@@ -3,6 +3,7 @@ import re
 from typing import Any
 
 import requests
+from requests import RequestException
 
 from config import settings
 
@@ -11,14 +12,10 @@ class TextGenerationError(RuntimeError):
     pass
 
 
-def _model_candidates(model_id: str) -> list[str]:
-    candidates = [
-        model_id,
-        "doubao-seed-2-0-lite-260215",
-        "doubao-seed-2.0-lite",
-        "doubao-seed-2-0-lite",
-    ]
-    return list(dict.fromkeys([item for item in candidates if item]))
+class TextRelayHTTPError(TextGenerationError):
+    def __init__(self, status_code: int, message: str) -> None:
+        super().__init__(message)
+        self.status_code = status_code
 
 
 def _extract_json(text: str) -> dict[str, Any]:
@@ -36,22 +33,65 @@ def _extract_json(text: str) -> dict[str, Any]:
         return json.loads(match.group(0))
 
 
+def _request_session() -> requests.Session:
+    session = requests.Session()
+    session.trust_env = settings.openai_text_use_env_proxy
+    return session
+
+
+def _openai_text_base_url() -> str:
+    base_url = settings.openai_text_base_url.rstrip("/")
+    if not base_url.endswith("/v1"):
+        base_url = f"{base_url}/v1"
+    return base_url
+
+
+def _validate_openai_relay_config() -> None:
+    if settings.text_model_provider != "openai_relay":
+        raise TextGenerationError(
+            f"暂不支持的文本模型供应商：{settings.text_model_provider}，请配置 TEXT_MODEL_PROVIDER=openai_relay"
+        )
+    if not settings.openai_text_base_url:
+        raise TextGenerationError("缺少 OPENAI_TEXT_BASE_URL，请在 .env 中配置中转站 /v1 地址。")
+    if not settings.openai_text_api_key:
+        raise TextGenerationError("缺少 OPENAI_TEXT_API_KEY，请在 .env 中配置中转站 Key。")
+
+
+def _chat_completion(payload: dict[str, Any], timeout: int) -> dict[str, Any]:
+    url = f"{_openai_text_base_url()}/chat/completions"
+    headers = {
+        "Authorization": f"Bearer {settings.openai_text_api_key}",
+        "Content-Type": "application/json",
+    }
+
+    try:
+        response = _request_session().post(url, headers=headers, json=payload, timeout=timeout)
+    except RequestException as exc:
+        proxy_hint = ""
+        if not settings.openai_text_use_env_proxy:
+            proxy_hint = "；当前已禁用环境代理，如你的中转站必须走代理，请设置 OPENAI_TEXT_USE_ENV_PROXY=true"
+        raise TextGenerationError(f"文本模型网络请求失败：{exc}{proxy_hint}") from exc
+
+    if response.status_code >= 400:
+        raise TextRelayHTTPError(
+            response.status_code,
+            f"文本模型调用失败：HTTP {response.status_code} {response.text[:500]}"
+        )
+
+    try:
+        return response.json()
+    except ValueError as exc:
+        raise TextGenerationError(f"文本模型返回非 JSON 内容：{response.text[:500]}") from exc
+
+
 def chat_json(
     system_prompt: str,
     user_prompt: str,
     temperature: float = 0.7,
     timeout: int = 90,
 ) -> dict[str, Any]:
-    if settings.text_model_provider != "ark":
-        raise TextGenerationError(f"暂不支持的文本模型供应商：{settings.text_model_provider}")
-    if not settings.ark_api_key:
-        raise TextGenerationError("缺少 ARK_API_KEY，请在 .env 中配置。")
+    _validate_openai_relay_config()
 
-    url = f"{settings.ark_base_url}/chat/completions"
-    headers = {
-        "Authorization": f"Bearer {settings.ark_api_key}",
-        "Content-Type": "application/json",
-    }
     payload: dict[str, Any] = {
         "model": settings.text_model_id,
         "messages": [
@@ -63,34 +103,12 @@ def chat_json(
         "response_format": {"type": "json_object"},
     }
 
-    last_response = None
-    for model in _model_candidates(settings.text_model_id):
-        payload["model"] = model
-        response = requests.post(url, headers=headers, json=payload, timeout=timeout)
-        if response.status_code < 400:
-            break
-        last_response = response
-        if response.status_code == 404:
-            continue
-        if "response_format" in payload:
-            retry_payload = dict(payload)
-            retry_payload.pop("response_format")
-            response = requests.post(url, headers=headers, json=retry_payload, timeout=timeout)
-            if response.status_code < 400:
-                break
-            last_response = response
-        break
-    else:
-        response = last_response
-
-    if response is None:
-        raise TextGenerationError("文本模型调用失败：没有收到响应。")
-    if response.status_code >= 400:
-        raise TextGenerationError(
-            f"文本模型调用失败：HTTP {response.status_code} {response.text[:500]}"
-        )
-
-    data = response.json()
+    try:
+        data = _chat_completion(payload, timeout)
+    except TextRelayHTTPError:
+        retry_payload = dict(payload)
+        retry_payload.pop("response_format", None)
+        data = _chat_completion(retry_payload, timeout)
     try:
         content = data["choices"][0]["message"]["content"]
     except (KeyError, IndexError, TypeError) as exc:

@@ -20,9 +20,9 @@ class Settings:
     ref_image_dir: str = os.getenv("REF_IMAGE_DIR", "参考图")
     output_dir: str = os.getenv("OUTPUT_DIR", "assets/outputs")
 
-    text_model_provider: str = os.getenv("TEXT_MODEL_PROVIDER", "ark")
-    text_model_name: str = os.getenv("TEXT_MODEL_NAME", "Doubao-Seed-2.0-lite")
-    text_model_id: str = os.getenv("TEXT_MODEL_ID", os.getenv("TEXT_MODEL_NAME", "Doubao-Seed-2.0-lite"))
+    text_model_provider: str = os.getenv("TEXT_MODEL_PROVIDER", "openai_relay")
+    text_model_name: str = os.getenv("TEXT_MODEL_NAME", "gpt-5.5")
+    text_model_id: str = os.getenv("TEXT_MODEL_ID", os.getenv("TEXT_MODEL_NAME", "gpt-5.5"))
     image_model_provider: str = os.getenv("IMAGE_MODEL_PROVIDER", "openai_relay")
     image_model_name: str = os.getenv("IMAGE_MODEL_NAME", "gpt-image-2")
     has_image_model_id_override: bool = "IMAGE_MODEL_ID" in os.environ
@@ -44,6 +44,13 @@ class Settings:
     openai_image_retry_delay_seconds: float = float(
         os.getenv("OPENAI_IMAGE_RETRY_DELAY_SECONDS", "2")
     )
+    openai_text_base_url: str = os.getenv(
+        "OPENAI_TEXT_BASE_URL", os.getenv("OPENAI_IMAGE_BASE_URL", "")
+    ).rstrip("/")
+    openai_text_api_key: str = os.getenv(
+        "OPENAI_TEXT_API_KEY", os.getenv("OPENAI_IMAGE_API_KEY", "")
+    )
+    openai_text_use_env_proxy: bool = _bool_env("OPENAI_TEXT_USE_ENV_PROXY", False)
 
     image_size: str = os.getenv("IMAGE_SIZE", "auto")
     image_output_format: str = os.getenv("IMAGE_OUTPUT_FORMAT", "png")
