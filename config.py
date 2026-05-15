@@ -37,6 +37,13 @@ class Settings:
     openai_image_base_url: str = os.getenv("OPENAI_IMAGE_BASE_URL", "").rstrip("/")
     openai_image_api_key: str = os.getenv("OPENAI_IMAGE_API_KEY", "")
     openai_image_use_env_proxy: bool = _bool_env("OPENAI_IMAGE_USE_ENV_PROXY", False)
+    openai_image_fallback_to_generation: bool = _bool_env(
+        "OPENAI_IMAGE_FALLBACK_TO_GENERATION", True
+    )
+    openai_image_retry_count: int = int(os.getenv("OPENAI_IMAGE_RETRY_COUNT", "1"))
+    openai_image_retry_delay_seconds: float = float(
+        os.getenv("OPENAI_IMAGE_RETRY_DELAY_SECONDS", "2")
+    )
 
     image_size: str = os.getenv("IMAGE_SIZE", "auto")
     image_output_format: str = os.getenv("IMAGE_OUTPUT_FORMAT", "png")

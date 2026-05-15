@@ -1,5 +1,6 @@
 import base64
 import mimetypes
+import time
 from pathlib import Path
 from typing import Any, BinaryIO
 
@@ -11,6 +12,12 @@ from config import settings
 
 class ImageGenerationError(RuntimeError):
     pass
+
+
+class ImageRelayHTTPError(ImageGenerationError):
+    def __init__(self, status_code: int, message: str) -> None:
+        super().__init__(message)
+        self.status_code = status_code
 
 
 def _request_session() -> requests.Session:
@@ -94,6 +101,38 @@ def _close_files(files: list[tuple[str, tuple[str, BinaryIO, str]]]) -> None:
         file_obj.close()
 
 
+def _request_once(
+    url: str,
+    headers: dict[str, str],
+    payload: dict[str, Any],
+    ref_images: list[str],
+    timeout: int,
+) -> requests.Response:
+    files: list[tuple[str, tuple[str, BinaryIO, str]]] = []
+    session = _request_session()
+    try:
+        if ref_images:
+            files = [_image_file_tuple(path) for path in ref_images]
+            form_payload = {key: str(value) for key, value in payload.items()}
+            return session.post(
+                url,
+                headers=headers,
+                data=form_payload,
+                files=files,
+                timeout=timeout,
+            )
+
+        json_headers = {**headers, "Content-Type": "application/json"}
+        return session.post(url, headers=json_headers, json=payload, timeout=timeout)
+    except RequestException as exc:
+        proxy_hint = ""
+        if not settings.openai_image_use_env_proxy:
+            proxy_hint = "；当前已禁用环境代理，如你的中转站必须走代理，请设置 OPENAI_IMAGE_USE_ENV_PROXY=true"
+        raise ImageGenerationError(f"图片模型网络请求失败：{exc}{proxy_hint}") from exc
+    finally:
+        _close_files(files)
+
+
 def _post_openai_image_request(
     endpoint: str,
     payload: dict[str, Any],
@@ -102,36 +141,29 @@ def _post_openai_image_request(
 ) -> dict[str, Any]:
     url = f"{_openai_image_base_url()}/{endpoint.lstrip('/')}"
     headers = {"Authorization": f"Bearer {settings.openai_image_api_key}"}
+    attempts = max(1, settings.openai_image_retry_count + 1)
 
-    files: list[tuple[str, tuple[str, BinaryIO, str]]] = []
-    session = _request_session()
-    try:
-        if ref_images:
-            files = [_image_file_tuple(path) for path in ref_images]
-            form_payload = {key: str(value) for key, value in payload.items()}
-            response = session.post(url, headers=headers, data=form_payload, files=files, timeout=timeout)
-        else:
-            json_headers = {**headers, "Content-Type": "application/json"}
-            response = session.post(url, headers=json_headers, json=payload, timeout=timeout)
-    except RequestException as exc:
-        proxy_hint = ""
-        if not settings.openai_image_use_env_proxy:
-            proxy_hint = "；当前已禁用环境代理，如你的中转站必须走代理，请设置 OPENAI_IMAGE_USE_ENV_PROXY=true"
-        raise ImageGenerationError(
-            f"图片模型网络请求失败：{exc}{proxy_hint}"
-        ) from exc
-    finally:
-        _close_files(files)
+    for attempt in range(attempts):
+        response = _request_once(url, headers, payload, ref_images, timeout)
+        if response.status_code < 400:
+            try:
+                return response.json()
+            except ValueError as exc:
+                raise ImageGenerationError(
+                    f"图片模型返回非 JSON 内容：{response.text[:500]}"
+                ) from exc
 
-    if response.status_code >= 400:
-        raise ImageGenerationError(
-            f"图片模型调用失败：HTTP {response.status_code} {response.text[:500]}"
+        retryable_status = response.status_code in {408, 429, 500, 502, 503, 504, 524}
+        if attempt < attempts - 1 and retryable_status:
+            time.sleep(settings.openai_image_retry_delay_seconds)
+            continue
+
+        raise ImageRelayHTTPError(
+            response.status_code,
+            f"图片模型调用失败：HTTP {response.status_code} {response.text[:500]}",
         )
 
-    try:
-        return response.json()
-    except ValueError as exc:
-        raise ImageGenerationError(f"图片模型返回非 JSON 内容：{response.text[:500]}") from exc
+    raise ImageGenerationError("图片模型调用失败：没有收到有效响应。")
 
 
 def generate_image_with_refs(
@@ -146,5 +178,17 @@ def generate_image_with_refs(
     refs = ref_images[: settings.max_ref_images_per_page]
     payload = _base_payload(prompt, size)
     endpoint = "images/edits" if refs else "images/generations"
-    data = _post_openai_image_request(endpoint, payload, refs, timeout)
+
+    try:
+        data = _post_openai_image_request(endpoint, payload, refs, timeout)
+    except ImageRelayHTTPError as exc:
+        can_fallback = (
+            refs
+            and settings.openai_image_fallback_to_generation
+            and exc.status_code in {408, 429, 500, 502, 503, 504, 524}
+        )
+        if not can_fallback:
+            raise
+        data = _post_openai_image_request("images/generations", payload, [], timeout)
+
     return _save_image_result(data, output_path)

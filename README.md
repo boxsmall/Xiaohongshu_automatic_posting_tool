@@ -104,12 +104,16 @@ IMAGE_MODEL_ID=gpt-image-2
 OPENAI_IMAGE_BASE_URL=https://你的中转站地址/v1
 OPENAI_IMAGE_API_KEY=你的中转站Key
 OPENAI_IMAGE_USE_ENV_PROXY=false
+OPENAI_IMAGE_FALLBACK_TO_GENERATION=true
+OPENAI_IMAGE_RETRY_COUNT=1
+OPENAI_IMAGE_RETRY_DELAY_SECONDS=2
 IMAGE_SIZE=auto
 IMAGE_OUTPUT_FORMAT=png
 ```
 
 `OPENAI_IMAGE_BASE_URL` 推荐填写到 `/v1`，如果只填写中转站根域名，程序会自动补 `/v1`。
 默认不继承系统代理，避免中转站请求被本机代理干扰；如果你的中转站必须通过本机代理访问，再把 `OPENAI_IMAGE_USE_ENV_PROXY=true`。
+如果中转站在 `/images/edits` 上返回 `524` 或其他临时 5xx，程序会先重试，再自动降级到 `/images/generations`，用纯文本提示词生成图片。
 
 如果中转站不是 OpenAI Images API 兼容格式，需要按中转站文档调整 `services/model_clients/image_client.py` 的请求字段。
 
